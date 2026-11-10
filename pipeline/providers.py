@@ -18,6 +18,7 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import wave
 from types import SimpleNamespace as NS
@@ -127,7 +128,7 @@ class Provider:
     def synthesize(self, text: str) -> bytes | None:
         """Return WAV bytes for `text`, or None if played directly by the OS."""
         if self.tts_backend == "system":
-            subprocess.run([os.getenv("SYSTEM_TTS_CMD", "say"), text], check=False)
+            subprocess.run([*shlex.split(os.getenv("SYSTEM_TTS_CMD") or "say"), text], check=False)
             return None
         speech_args = {
             "model": self.tts_model,
@@ -293,7 +294,7 @@ class MockProvider:
     def synthesize(self, text: str) -> bytes | None:
         """No cloud TTS. Optionally use a local voice command; else print-only."""
         if self.tts_backend == "system":
-            subprocess.run([os.getenv("SYSTEM_TTS_CMD", "say"), text], check=False)
+            subprocess.run([*shlex.split(os.getenv("SYSTEM_TTS_CMD") or "say"), text], check=False)
         return None  # voice_loop already prints the agent's text
 
 
