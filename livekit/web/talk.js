@@ -61,14 +61,22 @@ let currentTurnWasBargeIn = false;
 let activeAgentAudio = null;
 let playbackToken = 0;
 let bargeRecordingCandidate = false;
+let bargeLastAboveAt = 0;
+let activeUtterance = null;
 
 const tuning = {
   endpointSilenceMs: 650,
   sensitivity: 3.2,
   minTurnMs: 500,
   speechConfirmationMs: 110,
-  bargeInConfirmationMs: 200,
-  bargeInArmMs: 450,
+  // Barge-in is tuned for open speakers, where agent audio leaks into the mic:
+  // a longer arm window learns the echo level, and an interruption must be
+  // clearly louder than that echo and sustained before it cancels playback.
+  bargeInConfirmationMs: 700,
+  bargeInArmMs: 900,
+  bargeInEchoRatio: 2.6,
+  bargeInMaxThreshold: 0.18,
+  bargeInGapMs: 300,
   maxTurnMs: 20000,
 };
 
@@ -229,9 +237,27 @@ function speakWithBrowserVoice(text, locale, token) {
   const voice = chooseVoice(locale);
   if (voice) utterance.voice = voice;
 
+  // Chrome can drop `onend` (for example when the utterance is garbage
+  // collected), which would leave the UI stuck in "Agent speaking". Keep a
+  // reference and poll the synthesizer so playback always finishes.
+  activeUtterance = utterance;
+  const finish = () => {
+    clearInterval(watchdog);
+    if (activeUtterance === utterance) activeUtterance = null;
+    finishAgentPlayback(token);
+  };
+  const watchdog = setInterval(() => {
+    if (token !== playbackToken) {
+      clearInterval(watchdog);
+      return;
+    }
+    const synth = window.speechSynthesis;
+    if (agentSpeaking && !synth.speaking && !synth.pending) finish();
+  }, 250);
+
   utterance.onstart = () => beginAgentPlayback(token, "browser");
-  utterance.onend = () => finishAgentPlayback(token);
-  utterance.onerror = () => finishAgentPlayback(token);
+  utterance.onend = finish;
+  utterance.onerror = finish;
   window.speechSynthesis.speak(utterance);
 }
 
@@ -286,7 +312,10 @@ function thresholds() {
   return {
     start,
     end: Math.max(0.008, start * 0.58),
-    barge: Math.min(0.12, Math.max(0.024, start * 1.55, playbackEchoFloor * 1.8)),
+    barge: Math.min(
+      tuning.bargeInMaxThreshold,
+      Math.max(0.03, start * 1.8, playbackEchoFloor * tuning.bargeInEchoRatio),
+    ),
   };
 }
 
@@ -415,7 +444,12 @@ function vadLoop() {
     if (playbackAge < tuning.bargeInArmMs) {
       playbackEchoFloor = (playbackEchoFloor * 0.88) + (smoothedLevel * 0.12);
       bargeCandidateAt = 0;
-    } else if (smoothedLevel > limit.barge) {
+    } else if (
+      smoothedLevel > limit.barge
+      || (bargeCandidateAt && now - bargeLastAboveAt < tuning.bargeInGapMs)
+    ) {
+      // Short dips between words keep the candidate alive.
+      if (smoothedLevel > limit.barge) bargeLastAboveAt = now;
       if (!bargeCandidateAt) {
         bargeCandidateAt = now;
         bargeRecordingCandidate = true;
